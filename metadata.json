@@ -1,0 +1,8 @@
+{
+  "name": "یاری وشە - Kurdish Word Game",
+  "description": "A Wordle-style game for the Kurdish language (Sorani). Test your vocabulary with 3 and 8 letter words.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
