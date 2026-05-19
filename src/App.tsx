@@ -80,14 +80,29 @@ export default function App() {
   // Auth/Startup & Session Listener
   useEffect(() => {
     let isMounted = true;
+    
+    // Fail-safe timeout: Ensure we move past the loading screen within 5 seconds
+    const fallbackTimeout = setTimeout(() => {
+      if (isMounted) {
+        console.warn("Auth check timed out, falling back to auth screen");
+        setLoading(false);
+      }
+    }, 6000);
 
     const checkSessionAndSubscribe = async () => {
-      // 1. Initial Check
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session && isMounted) {
-        await fetchUserProfile(session.user.id, session.user.email || '');
-      } else if (isMounted) {
-        setLoading(false);
+      try {
+        // 1. Initial Check
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        
+        if (session && isMounted) {
+          await fetchUserProfile(session.user.id, session.user.email || "");
+        } else if (isMounted) {
+          setLoading(false);
+        }
+      } catch (err) {
+        console.error("Startup auth check failed:", err);
+        if (isMounted) setLoading(false);
       }
 
       // 2. Listen for changes
@@ -95,7 +110,7 @@ export default function App() {
         if (!isMounted) return;
         
         if (session) {
-          await fetchUserProfile(session.user.id, session.user.email || '');
+          await fetchUserProfile(session.user.id, session.user.email || "");
         } else {
           setUser(null);
           setScreen('auth');
@@ -141,6 +156,7 @@ export default function App() {
 
     return () => {
       isMounted = false;
+      clearTimeout(fallbackTimeout);
       subscriptionPromise.then(sub => sub.unsubscribe());
     };
   }, []);
@@ -268,9 +284,20 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-game-bg">
+      <div className="flex flex-col items-center justify-center min-h-screen bg-game-bg p-6 text-center">
         <RefreshCcw className="w-12 h-12 text-game-gold animate-spin" />
-        <p className="mt-4 text-game-gold font-bold font-rubik">خەریکە بار دەبێت...</p>
+        <p className="mt-4 text-game-gold font-bold font-rubik text-xl">دەبوەستە مردوت نەمرێ...</p>
+        <p className="mt-2 text-game-text2 text-xs opacity-60">تکایە کەمێک سەبرت هەبێت، خەریکی ئامادەکردنی یاریەکەین</p>
+        
+        <motion.button
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 3 }}
+          onClick={() => setLoading(false)}
+          className="mt-10 px-6 py-2 bg-white/5 border border-white/10 rounded-xl text-game-text2 text-xs font-bold hover:bg-white/10 transition-all"
+        >
+          هێشتا لێرەی؟ لێرە تاق بکەرەوە
+        </motion.button>
       </div>
     );
   }
@@ -586,6 +613,13 @@ function AuthScreen({ onSuccess }: { onSuccess: (u: UserScore) => void }) {
     setLoading(true);
     setError('');
 
+    const timeoutId = setTimeout(() => {
+      if (loading) {
+        setError('پەیوەندی زۆر خاوە، تکایە دووبارە هەوڵ بدەرەوە');
+        setLoading(false);
+      }
+    }, 15000);
+
     try {
       if (isSignUp) {
         const { data: authData, error: authError } = await supabase.auth.signUp({
@@ -595,18 +629,15 @@ function AuthScreen({ onSuccess }: { onSuccess: (u: UserScore) => void }) {
         if (authError) throw authError;
         
         if (authData.user) {
-          await supabase.from('kurd').insert({
+          const newUser = {
             id: authData.user.id,
-            name: formData.name,
+            name: formData.name || authData.user.email?.split('@')[0] || 'یاریزان',
             email: formData.email,
             score: 0
-          });
-          onSuccess({
-            id: authData.user.id,
-            name: formData.name,
-            email: formData.email,
-            score: 0
-          });
+          };
+          await supabase.from('kurd').insert(newUser);
+          clearTimeout(timeoutId);
+          onSuccess(newUser);
         }
       } else {
         const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
@@ -616,22 +647,41 @@ function AuthScreen({ onSuccess }: { onSuccess: (u: UserScore) => void }) {
         if (authError) throw authError;
 
         if (authData.user) {
-          const { data } = await supabase
+          const { data, error: dbError } = await supabase
             .from('kurd')
             .select('*')
             .eq('id', authData.user.id)
-            .single();
+            .maybeSingle();
           
-          onSuccess({
-            id: authData.user.id,
-            name: data?.name || authData.user.email?.split('@')[0] || 'یاریزان',
-            email: authData.user.email || '',
-            score: data?.score || 0
-          });
+          if (dbError) throw dbError;
+
+          if (data) {
+            clearTimeout(timeoutId);
+            onSuccess({
+              id: authData.user.id,
+              name: data.name,
+              email: authData.user.email || '',
+              score: data.score
+            });
+          } else {
+            // User exists in Auth but not in 'kurd' table (failed previous signup?)
+            // Auto-create profile to recover
+            const recoveryUser = {
+              id: authData.user.id,
+              name: authData.user.email?.split('@')[0] || 'یاریزان',
+              email: authData.user.email || '',
+              score: 0
+            };
+            await supabase.from('kurd').insert(recoveryUser);
+            clearTimeout(timeoutId);
+            onSuccess(recoveryUser);
+          }
         }
       }
     } catch (err: any) {
+      console.error("Auth error:", err);
       setError(err.message || 'هەڵەیەک ڕوویدا');
+      clearTimeout(timeoutId);
     } finally {
       setLoading(false);
     }
@@ -672,6 +722,14 @@ function AuthScreen({ onSuccess }: { onSuccess: (u: UserScore) => void }) {
             type="button"
             onClick={async () => {
               setLoading(true);
+              setError('');
+              const tId = setTimeout(() => {
+                if (loading) {
+                  setError('پەیوەندی زۆر خاوە، تکایە دووبارە هەوڵ بدەرەوە');
+                  setLoading(false);
+                }
+              }, 10000);
+              
               try {
                 const guestId = `guest_${Math.random().toString(36).substr(2, 9)}`;
                 const guestName = `میوان_${Math.random().toString(36).substr(2, 4)}`;
@@ -682,9 +740,12 @@ function AuthScreen({ onSuccess }: { onSuccess: (u: UserScore) => void }) {
                   score: 0
                 };
                 await supabase.from('kurd').insert(guestUser);
+                clearTimeout(tId);
                 onSuccess(guestUser);
               } catch (err) {
+                console.error("Guest login error:", err);
                 setError('‌هەڵەیەک لە واستەدا ڕوویدا');
+                clearTimeout(tId);
               } finally {
                 setLoading(false);
               }
@@ -1008,9 +1069,17 @@ function GameScreen({
           />
           <button 
             onClick={onSubmit}
-            className="px-10 bg-gradient-to-r from-game-cyan to-[#0099cc] text-game-bg font-black rounded-2xl shadow-xl active:scale-95 transition-all flex items-center justify-center"
+            disabled={currentGuess.length !== level}
+            className={cn(
+              "px-8 bg-gradient-to-r text-game-bg font-black rounded-2xl shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2 grow sm:grow-0",
+              currentGuess.length === level 
+                ? "from-game-green to-[#2ecc71] opacity-100 shadow-[0_0_20px_rgba(46,204,113,0.3)]" 
+                : "from-white/10 to-white/5 text-gray-500 opacity-50 cursor-not-allowed"
+            )}
           >
-            <Send className="w-6 h-6" />
+            <span className="text-sm font-black hidden sm:inline">ناردنی وشە</span>
+            <span className="text-sm font-black sm:hidden">ناردن</span>
+            <Send className="w-5 h-5" />
           </button>
         </div>
 
@@ -1158,7 +1227,7 @@ function LeaderboardScreen({ onBack }: { onBack: () => void }) {
           {loading ? (
             <div className="flex flex-col items-center justify-center py-32 opacity-50">
                <RefreshCcw className="w-10 h-10 animate-spin text-game-gold mb-4" />
-               <p className="font-bold">خەریکە بار دەبێت...</p>
+               <p className="font-bold">دەبوەستە مردوت نەمرێ...</p>
             </div>
           ) : data.length === 0 ? (
             <div className="text-center py-20 text-game-text2 font-bold">هێشتا هیچ شێرێک نییە! 🦁</div>
